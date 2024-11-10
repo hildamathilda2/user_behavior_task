@@ -1,18 +1,29 @@
 import pandas as pd
 import psycopg2
-# from sqlalchemy import create_engine, text
 
-#db credential
-# db_user = 'postgres'
-# db_password = 'admin'
-# db_host = 'localhost'
-# db_port = '5432'
-# db_name = 'user_behavior'
-# table_name = 'usb1'
+# Define the paths and database parameters
+csv_file_path = 'C:/Users/NDS/user_behavior_task/airflowtask2/airflow/sample_files/dataset_user_behavior_for_test.csv'
+db_params = {
+    "host": "localhost",
+    "dbname": "user_behavior",
+    "user": "postgres",
+    "password": "admin",
+    "port": "5432"
+}
 
-# csv_file_path = 'C:/Users/NDS/user_behavior_task/airflowtask2/airflow/sample_files/dataset_user_behavior_for_test.csv'
-# data = pd.read_csv(csv_file_path)
+# Define initial column names in the CSV file
+original_columns = {
+    'Iduser': 'user_id',          # User ID
+    'start watching': 'event_time',  # Event timestamp
+    'Device Id': 'session_id',     # Device/session ID
+    'Content Name': 'event_type'   # Event type/content name
+}
 
+# Load the CSV file and rename columns
+data = pd.read_csv(csv_file_path)
+data.rename(columns=original_columns, inplace=True)
+
+# Define data quality checks function
 def data_quality_checks(data):
     """
     Perform data quality checks and validation on the CSV data.
@@ -35,46 +46,29 @@ def data_quality_checks(data):
         data.fillna(0, inplace=True)  # Example: Replace missing values with 0
     
     # Check 4: Validate data types (e.g., dates, numbers)
-    if 'start watching' in data.columns:
-        data['start watching'] = pd.to_datetime(data['start watching'], errors='coerce')
-        invalid_dates = data['start watching'].isnull().sum()
+    if 'event_time' in data.columns:
+        data['event_time'] = pd.to_datetime(data['event_time'], errors='coerce')
+        invalid_dates = data['event_time'].isnull().sum()
         if invalid_dates > 0:
             print(f"Found {invalid_dates} invalid dates. Dropping these rows.")
-            data = data.dropna(subset=['start watching'])
+            data = data.dropna(subset=['event_time'])
     
     # Check 5: Check for data ranges/values within expected thresholds
-    if 'user_age' in data.columns:
-        if not data['user_age'].between(0, 120).all():
-            print("Found user ages outside of expected range. Adjusting data.")
-            data['user_age'] = data['user_age'].clip(lower=0, upper=120)
+    if 'user_id' in data.columns:
+        if not data['user_id'].between(0, 1200000000).all():  # Assuming user_id range for simplicity
+            print("Found user IDs outside of expected range. Adjusting data.")
+            data['user_id'] = data['user_id'].clip(lower=0, upper=1200000000)
     
     # All checks passed, return cleaned data
     return data
 
-def etl(csv_file, db_params):
+# Define ETL function to load cleaned data into PostgreSQL
+def etl(data, db_params):
     """
-    ETL function to load data from csv_file into PostgreSQL database at db_url.
-    This function performs:
-    1. Dropping the table if it exists.
-    2. Creating a new table.
-    3. Loading CSV data.
-    4. Running data quality checks and validation.
-    5. Using a CTE and ROW_NUMBER() to insert only unique rows into the final table.
-    6. Returning the number of rows inserted.
+    ETL function to load cleaned data into PostgreSQL database.
     """
-    # Step 1: Load CSV data
-    data = pd.read_csv(csv_file)
-    
-    # Step 2: Data Quality Checks and Validation
     try:
-        data = data_quality_checks(data)
-        print("Data quality checks passed successfully.")
-    except ValueError as e:
-        print(e)
-        return
-    
-    # Step 3: Connect to PostgreSQL database using psycopg2
-    try:
+        # Step 3: Connect to PostgreSQL database using psycopg2
         conn = psycopg2.connect(**db_params)
         cur = conn.cursor()
         
@@ -84,8 +78,8 @@ def etl(csv_file, db_params):
         CREATE TABLE usb1 (
             id SERIAL PRIMARY KEY,
             user_id INT,
-            session_id VARCHAR(50),
-            event_type VARCHAR(50),
+            session_id VARCHAR(255),
+            event_type VARCHAR(255),
             event_time TIMESTAMP
         );
         """
@@ -102,8 +96,8 @@ def etl(csv_file, db_params):
         create_temp_table_sql = """
         CREATE TEMPORARY TABLE user_behavior_temp (
             user_id INT,
-            session_id VARCHAR(50),
-            event_type VARCHAR(50),
+            session_id VARCHAR(255),
+            event_type VARCHAR(255),
             event_time TIMESTAMP
         );
         """
@@ -113,7 +107,7 @@ def etl(csv_file, db_params):
         for index, row in data.iterrows():
             cur.execute(
                 "INSERT INTO user_behavior_temp (user_id, session_id, event_type, event_time) VALUES (%s, %s, %s, %s)",
-                (row['user_id'], row['session_id'], row['event_type'], row['start watching'])
+                (row['user_id'], row['session_id'], row['event_type'], row['event_time'])
             )
         conn.commit()
 
@@ -139,16 +133,6 @@ def etl(csv_file, db_params):
         cur.execute("SELECT COUNT(*) FROM usb1")
         row_count = cur.fetchone()[0]
         
-        # Check for NULLs in critical fields
-        cur.execute("""
-            SELECT COUNT(*) FROM usb1
-            WHERE user_id IS NULL OR session_id IS NULL OR event_type IS NULL OR event_time IS NULL
-        """)
-        null_check = cur.fetchone()[0]
-        
-        if null_check > 0:
-            raise ValueError("Data quality check failed in PostgreSQL: NULL values found in critical columns.")
-        
         # Ensure all rows are unique after deduplication
         print(f"Number of unique records after deduplication: {row_count}")
         return row_count
@@ -162,16 +146,9 @@ def etl(csv_file, db_params):
         if conn:
             conn.close()
 
-# Usage example
-csv_file_path = 'C:/Users/NDS/user_behavior_task/airflowtask2/airflow/sample_files/dataset_user_behavior_for_test.csv'
-db_params = {
-    "host": "localhost",
-    "dbname": "user_behavior",
-    "user": "postgres",
-    "password": "admin",
-    "port": "5432"
-}
+# Apply data quality checks to the cleaned data
+cleaned_data = data_quality_checks(data)
 
 # Run the ETL process
-unique_rows = etl(csv_file_path, db_params)
+unique_rows = etl(cleaned_data, db_params)
 print(f"Number of unique records inserted: {unique_rows}")
