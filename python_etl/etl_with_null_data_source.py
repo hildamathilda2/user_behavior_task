@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import re
 import psycopg2
 
 # Define the path to the uploaded CSV file and database parameters
@@ -26,9 +27,8 @@ column_mapping = {
 }
 
 # Load the CSV file
-data = pd.read_csv(csv_file_path)
+data = pd.read_csv(csv_file_path, quotechar='"', escapechar='\\')
 print(data.dtypes)
-
 
 # Define a function to prepare and clean data
 def prepare_data(data, column_mapping):
@@ -38,10 +38,99 @@ def prepare_data(data, column_mapping):
     # Rename columns based on the provided mapping
     data = data.rename(columns=column_mapping)
     print(data['start_watching'].head())
+    print(data.isnull().sum())
+    print(data[data.isnull().any(axis=1)])
+    contains_quotes_event_type = data['user_id'].str.contains('"', na=False)
+    print(data[contains_quotes_event_type])
 
     # Fill missing start_watching values based on column type
     # data = data.apply(lambda col: col.fillna('unknown') if col.dtype == 'object' else col)
     # data = data.apply(lambda col: col.fillna(0) if np.issubdtype(col.dtype, np.number) else col)
+
+    # Ensure 'user_id' is a string for proper processing
+    data['user_id'] = data['user_id'].astype(str)
+
+    def split_row(row):
+        try:
+        # Regular expression to match fields
+        # - Match any sequence of non-comma characters ([^,]+)
+        # - Match quoted content (which may contain commas), like "LHEGANGSTER,THECOP,THEDEVI"
+           pattern = r'"([^"]*)"|([^",]+)'
+
+        # Find all matches using the regex pattern
+           parts = []
+           for match in re.finditer(pattern, row):
+            # If we have a quoted field, use it
+             if match.group(1):
+                parts.append(f'"{match.group(1)}"')  # Content inside quotes
+             elif match.group(2):
+                parts.append(match.group(2))  # Non-quoted content
+        
+        # Ensure we have the expected number of parts (8 expected, based on the example you gave)
+           if len(parts) < 9:
+             raise ValueError(f"Unexpected row format: {row}")
+
+        # Assign values based on the expected positions of the split data
+           return {
+            'user_id': parts[0],  # First part is user_id
+            'start_watching': parts[1],  # Second part is start_watching
+            'session_id': parts[2],  # Third part is session_id
+            'province': parts[3],  # Fourth part is province
+            'city': parts[4],  # Fifth part is city
+            'event_type': parts[5],  # Sixth part is event_type
+            'content_name': parts[6],  # Seventh part is content_name (may contain commas)
+            'content_type': parts[7],  # Eighth part is content_type
+            'device_type': parts[8],  # Ninth part is device_type
+           }
+        except Exception as e:
+           print(f"Error processing row: {row}")
+           print(f"Error message: {str(e)}")
+           return None  # Return None or some other fallback in case of error
+
+# Step 1: Rename the columns to avoid overlap
+    data = data.rename(columns={
+    'user_id': 'user_id_old',
+    'start_watching': 'start_watching_old',
+    'session_id': 'session_id_old',
+    'province': 'province_old',
+    'city': 'city_old',
+    'event_type': 'event_type_old',
+    'device_type': 'device_type_old',
+    'content_type': 'content_type_old',
+    })
+
+# Step 2: Apply the split_row function to 'user_id_old' (or whatever column contains raw data)
+    data['split_data'] = data['user_id_old'].apply(split_row)
+
+# Step 3: Expand the resulting dictionary into separate columns
+    split_columns = data['split_data'].apply(pd.Series)
+
+# Step 4: Add suffix to the new columns to avoid conflict with old column names
+    split_columns = split_columns.add_suffix('_new')
+
+# Step 5: Join the new columns with the original dataframe
+    data = data.join(split_columns)
+
+# Optionally, drop the 'split_data' column if it's no longer needed
+    data.drop('split_data', axis=1, inplace=True)
+
+# Step 6: Optionally, you can rename back the '_old' columns to the original column names if necessary
+    data = data.rename(columns={
+    'user_id_old': 'user_id',
+    'start_watching_old': 'start_watching',
+    'session_id_old': 'session_id',
+    'province_old': 'province',
+    'city_old': 'city',
+    'event_type_old': 'event_type',
+    'device_type_old': 'device_type',
+    'content_type_old': 'content_type',
+    })
+    print(data)
+
+
+    data['user_id'] = pd.to_numeric(data['user_id'], errors='coerce').fillna(0).astype(int)
+    data['play_time_ms'] = pd.to_numeric(data['play_time_ms'], errors='coerce').fillna(0).astype(int)
+
     data = data.apply(
         lambda col: pd.to_datetime(col, format="%m/%d/%Y %H:%M", errors='coerce').fillna(pd.Timestamp('1970-01-01 00:00:00')) 
         if col.name == 'start_watching' else col
@@ -85,12 +174,12 @@ def prepare_data(data, column_mapping):
         data['city'] = data['city'].str.title()
 
     # Ensure 'user_id' and 'play_time_ms' values are non-negative
-    if 'user_id' in data.columns:
-        data['user_id'] = pd.to_numeric(data['user_id'], errors='coerce').fillna(0).astype(int)
-        data['user_id'] = data['user_id'].clip(lower=0)
-    if 'play_time_ms' in data.columns:
-        data['play_time_ms'] = pd.to_numeric(data['play_time_ms'], errors='coerce').fillna(0).astype(int)
-        data['play_time_ms'] = data['play_time_ms'].clip(lower=0)
+    # if 'user_id' in data.columns:
+    #     data['user_id'] = pd.to_numeric(data['user_id'], errors='coerce').fillna(0).astype(int)
+    #     data['user_id'] = data['user_id'].clip(lower=0)
+    # if 'play_time_ms' in data.columns:
+    #     data['play_time_ms'] = pd.to_numeric(data['play_time_ms'], errors='coerce').fillna(0).astype(int)
+    #     data['play_time_ms'] = data['play_time_ms'].clip(lower=0)
 
     # Replace remaining NaN values with None for database compatibility
     # return data.where(pd.notnull(data), None)
@@ -99,6 +188,8 @@ def prepare_data(data, column_mapping):
 # Apply data preparation function
 cleaned_data = prepare_data(data, column_mapping)
 print(f"Number of rows in cleaned data: {cleaned_data.shape[0]}")
+print(cleaned_data[cleaned_data.isna().any(axis=1)])
+print(cleaned_data.iloc[3821])
 
 # Define ETL function to load cleaned data into PostgreSQL
 def etl(data, db_params):
